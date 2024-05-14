@@ -1,28 +1,50 @@
-from config import TOKEN,MONGODB,DATABASE,COLLECTION
+from config import TOKEN,MONGODB,DATABASE,COLLECTION,COLLECTION2,admin_id
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command,CommandObject
+from aiogram.fsm.state import State,StatesGroup
 from pymongo.mongo_client import MongoClient
-from pymongo import MongoClient, DESCENDING
+from pymongo import MongoClient,DESCENDING
+from aiogram.fsm.context import FSMContext
 from aiogram import Bot,types,Dispatcher
+import string
 import logging
 import asyncio
+import random
 import time
 import sys
 
 bot = Bot(token=TOKEN,parse_mode="HTML")
 dp = Dispatcher()
-balance = 1000
-last_roll ={}
+client = MongoClient(MONGODB)
+database = client[DATABASE]
+collection = database[COLLECTION]
+collection2 = database[COLLECTION2]
+MAX_ACTIVATIONS = 5
+COINS = 1000
+
+class rasilka(StatesGroup):
+    message = State()
+
+@dp.message(Command("send_all"))
+async def send_all(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    if str(user_id) == str(admin_id):
+        await message.answer('Write a message for mailing')
+        await state.set_state(rasilka.message)
+
+@dp.message(rasilka.message)
+async def handle_message_for_broadcast(message: types.Message, state: FSMContext):
+    state_message = message.text
+    user_id = message.from_user.id
+    if user_id == admin_id:
+        ids = [user['id'] for user in collection.find({}, {'id': 1, '_id': 0})]
+        for user_id in ids:
+            await bot.send_message(user_id, state_message)
+        await state.clear()
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await bot.send_message(message.from_user.id,"Hey, i'm casino bot in telegram use Games for check avalible games, send /help to see commands")
-    try:
-        client = MongoClient(MONGODB)
-        database = client[DATABASE]
-        collection = database[COLLECTION]
-    except Exception as e:
-        raise Exception("The following error occurred: ", e)
-    
     user_id = message.from_user.id
     user_name = message.from_user.username
     user = {
@@ -30,9 +52,82 @@ async def start(message: types.Message):
         "Name" : user_name,
         "Balance" : 1000
     }
-    
     if collection.find_one({"id": user_id}) is None:
-        result = collection.insert_one(user)
+        collection.insert_one(user)
+
+@dp.message(Command('gpromo'))
+async def generate_code(message: types.Message):
+    user_id = message.from_user.id
+    if user_id == admin_id:
+        code = generate_random_code()
+        try:
+            collection2.insert_one({'code': code, 'max_activations': MAX_ACTIVATIONS, 'activations': 0, 'users': [], 'coins': COINS})
+        except Exception as e:
+            print(f"Error while inserting into DB: {e}")
+            return
+        await message.answer(f"New promo code generated: {code}")
+    else:
+        await bot.send_message(user_id,"You cant use this")
+
+def generate_random_code():
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
+
+@dp.message(Command('promo'))
+async def use_code(message: types.Message):
+    if len(message.text.split()) < 2:
+        await message.answer("You did not specify a promotional code.")
+        return
+    code_to_check = message.text.split()[1]
+    try:
+        code_info = collection2.find_one({'code': code_to_check})
+    except Exception as e:
+        print(f"Error while fetching from DB: {e}")
+        return
+    if not code_info:
+        await message.answer("Promo code is invalid.")
+        return
+    max_activations = code_info.get('max_activations', 1)
+    activations = code_info.get('activations', 0)
+    if activations >= max_activations:
+        await message.answer("The promotional code has already been used the maximum number of times.")
+        return
+    user_id = message.from_user.id
+    if user_id in code_info.get('users', []):
+        await message.answer("You have already used this promo code.")
+        return
+    try:
+        collection2.update_one(
+            {'code': code_to_check},
+            {'$inc': {'activations': 1}, '$push': {'users': user_id}}
+        )
+    except Exception as e:
+        print(f"Error while updating DB: {e}")
+        return
+    
+    coins = code_info.get('coins', 0)
+    add_coins(user_id, coins)
+    
+    await message.answer(f"Promo code successfully activated! You received {coins} coins!")
+
+def add_coins(user_id: int, coins: int):
+    user = collection.find_one({'id': user_id})
+    if user:
+        try:
+            collection.update_one(
+                {'id': user_id},
+                {'$inc': {'Balance': coins}}
+            )
+        except Exception as e:
+            print(f"Error while updating DB: {e}")
+            return
+    else:
+        try:
+            collection.insert_one(
+                {'id': user_id, 'Name': 'New User', 'Balance': coins}
+            )
+        except Exception as e:
+            print(f"Error while inserting into DB: {e}")
+            return
 
 @dp.message(Command("help"))
 async def help(message: types.Message):
@@ -40,9 +135,6 @@ async def help(message: types.Message):
 
 @dp.message(Command("leaderboards"))
 async def leaderboards(message: types.Message):
-    client = MongoClient(MONGODB)
-    database = client[DATABASE]
-    collection = database[COLLECTION]
     top_users = collection.find().sort("Balance", DESCENDING).limit(10)
     leaderboard = "Top 10 users:\n\n"
 
@@ -55,10 +147,6 @@ async def leaderboards(message: types.Message):
 
 @dp.message(Command("balance"))
 async def balance(message: types.Message):
-    client = MongoClient(MONGODB)
-    database = client[DATABASE]
-    collection = database[COLLECTION]
-
     user_id = message.from_user.id
     user = collection.find_one({"id": user_id})
 
@@ -76,7 +164,7 @@ async def balance(message: types.Message):
 @dp.message(Command("roll"))
 async def handler_game(message: types.Message, command: CommandObject):
     user_id = message.from_user.id
-
+    last_roll = {}
     if user_id in last_roll and time.time() - last_roll[user_id] < 10:
         await bot.send_message(user_id, "Please, wait 10 seconds before using the command /roll.")
         return
@@ -91,11 +179,6 @@ async def handler_game(message: types.Message, command: CommandObject):
     except ValueError:
         await bot.send_message(message.from_user.id, "Error, try: /roll 1")
         return
-
-    client = MongoClient(MONGODB)
-    database = client[DATABASE]
-    collection = database[COLLECTION]
-
     user_id = message.from_user.id
     user = collection.find_one({"id": user_id})
 
@@ -126,7 +209,7 @@ async def handler_game(message: types.Message, command: CommandObject):
 
         if value > value2:
             balance -= bet
-            await bot.send_message(message.from_user.id, "You lose! But 99,99% players leave befor BIG WIN!")
+            await bot.send_message(message.from_user.id, "You lose! But 99,99% gamblers leave befor BIG WIN!")
             await bot.send_message(message.from_user.id,f"Your Balance {balance}")
         elif value < value2:
             balance += bet
@@ -142,7 +225,16 @@ async def handler_game(message: types.Message, command: CommandObject):
 
 async def main() -> None:
     bot = Bot(TOKEN)
+    await bot.set_my_commands([
+        types.BotCommand(command="/leaderboards", description="Show Leaderboards"),
+        types.BotCommand(command="/roll", description="Roll dice")
+    ])
     await dp.start_polling(bot)
+
+
+# async def main() -> None:
+#     bot = Bot(TOKEN)
+#     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, stream=sys.stdout)
