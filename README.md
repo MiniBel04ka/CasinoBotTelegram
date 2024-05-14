@@ -57,7 +57,7 @@
 
 
 v1.0
-[P]/start
+[P]/start 
 [P]/help
 [P]/roll
 [P]/leaderboards
