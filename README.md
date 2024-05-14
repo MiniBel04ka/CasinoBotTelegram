@@ -54,3 +54,15 @@
 7. MONGODB idk how to get this shit
 8. DATABASE = "YOUR_DATABASE_NAME", example "mongo"
 9. COLLECTION = "YOUR_COLLECTION_NAME" example "users"
+
+
+v1.0
+[P]/start
+[P]/help
+[P]/roll
+[P]/leaderboards
+[P]/balance
+v1.1
+[A]/send_all
+[A]/gpromo
+[P]/promo
